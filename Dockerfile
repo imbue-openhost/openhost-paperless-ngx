@@ -16,27 +16,31 @@
 #      and the rest of the app will start as it does in the standard
 #      docker-compose deployment.
 #
-#   2. `init-openhost-bootstrap`, a oneshot ordered before any other
-#      init (and before `init-complete`). It:
-#        * relocates Paperless's data/media/consume/export dirs to
-#          $OPENHOST_APP_DATA_DIR via symlinks so all state survives
-#          container re-creation;
-#        * on first boot only, generates a 24-byte url-safe random
-#          password for the `operator` superuser, writes it to
+#   2. `init-openhost-bootstrap`, a oneshot ordered before
+#      `init-folders` and (transitively) before everything else. It:
+#        * sets PAPERLESS_DATA_DIR / PAPERLESS_MEDIA_ROOT /
+#          PAPERLESS_CONSUMPTION_DIR in the s6 container_environment
+#          to point at $OPENHOST_APP_DATA_DIR/{data,media,consume}
+#          so all persistent state lives in OpenHost's backed-up
+#          storage. (We can't symlink /usr/src/paperless/{data,...}
+#          because the upstream Dockerfile declares those paths as
+#          VOLUMEs and they become live mountpoints in the running
+#          container.)
+#        * on first boot only, generates a 24-byte random password
+#          for the `operator` superuser, writes it to
 #          $OPENHOST_APP_DATA_DIR/admin-password.txt with mode 0600,
 #          and exports PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD
-#          / PAPERLESS_ADMIN_MAIL into the s6 contenv so that the
-#          upstream `init-superuser` oneshot (which is idempotent —
-#          it only creates the user if it doesn't already exist) does
-#          the right thing. A sentinel file
+#          into the contenv so the upstream `init-superuser` oneshot
+#          (idempotent: only creates the user if it doesn't already
+#          exist) creates the account. A sentinel
 #          `$OPENHOST_APP_DATA_DIR/.admin_bootstrapped` makes this a
 #          no-op on subsequent boots, so an operator who later
-#          changes the admin password through the Paperless UI will
-#          not have it overwritten.
+#          changes the password through the Paperless UI does not
+#          have it overwritten.
 #        * derives PAPERLESS_URL / PAPERLESS_ALLOWED_HOSTS /
 #          PAPERLESS_CSRF_TRUSTED_ORIGINS from $OPENHOST_ZONE_DOMAIN
 #          so Django accepts requests routed through the OpenHost
-#          router (which arrives with a Host header of
+#          router (which arrive with a Host header of
 #          paperless-ngx.<zone>).
 #
 # We deliberately do NOT add an auth-proxy sidecar. Paperless's auth
@@ -53,19 +57,14 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 # redis-server for the bundled Redis sidecar. We pin --no-install-recommends
 # to avoid pulling redis-tools / redis-sentinel which we don't use.
-# `gosu` already exists in the upstream image, so `s6-setuidgid` (used
-# elsewhere for dropping to the `paperless` user) keeps working.
+# We don't drop to the `redis` user inside the container — the whole
+# container runs under rootless podman, so "root" is already an
+# unprivileged userns-mapped uid on the host.
 RUN set -eux \
     && apt-get update \
     && apt-get install --yes --no-install-recommends redis-server \
     && apt-get clean --yes \
     && rm -rf /var/lib/apt/lists/*
-
-# Make sure the redis user can write to its runtime/data dirs from
-# inside our s6 service. The `redis` user (uid 100ish) is created by
-# the redis-server postinst. We keep it.
-RUN mkdir -p /var/run/redis /var/lib/redis /var/log/redis \
-    && chown -R redis:redis /var/run/redis /var/lib/redis /var/log/redis
 
 # Drop in our Redis service + OpenHost bootstrap oneshot.
 #

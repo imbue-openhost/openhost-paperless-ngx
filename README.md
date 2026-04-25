@@ -34,12 +34,13 @@ $OPENHOST_APP_DATA_DIR/
 ├── data/                  # SQLite DB, search index (Whoosh), classifier model
 ├── media/                 # Original PDFs + thumbnails (the bulk of disk use)
 ├── consume/               # Drop-zone for new docs (paperless watches via inotify)
-├── export/                # Export staging
 ├── admin-password.txt     # Generated on first boot, mode 0600
 └── .admin_bootstrapped    # Sentinel — presence skips admin re-creation
 ```
 
 The OpenHost backup system covers this whole tree.
+
+The bootstrap wires Paperless to these locations by setting `PAPERLESS_DATA_DIR`, `PAPERLESS_MEDIA_ROOT`, and `PAPERLESS_CONSUMPTION_DIR` at runtime; the upstream `/usr/src/paperless/{data,media,consume,export}` paths (declared as `VOLUME` by the upstream image) are left as anonymous volumes and unused. Export staging continues to live in the anonymous volume since Paperless doesn't expose an env override for it; that's fine because export output is throwaway data the operator copies elsewhere.
 
 ## Logging in
 
@@ -93,8 +94,8 @@ openhost.toml                                                       # OpenHost m
 Dockerfile                                                          # Builds on ghcr.io/paperless-ngx/paperless-ngx:latest
 rootfs/                                                             # COPY'd into the image
 ├── etc/s6-overlay/s6-rc.d/svc-redis/                               # Redis longrun service
-├── etc/s6-overlay/s6-rc.d/init-openhost-bootstrap/                 # First-boot bootstrap (relocate dirs, mint admin password, set Django host config)
-├── etc/s6-overlay/s6-rc.d/init-folders/dependencies.d/init-openhost-bootstrap   # Order bootstrap before paperless dir-prep
+├── etc/s6-overlay/s6-rc.d/init-openhost-bootstrap/                 # Per-boot bootstrap (point data dirs at OPENHOST_APP_DATA_DIR via PAPERLESS_*_DIR env vars, mint admin password, set Django host config)
+├── etc/s6-overlay/s6-rc.d/init-folders/dependencies.d/init-openhost-bootstrap   # Order bootstrap before paperless dir-prep so PAPERLESS_DATA_DIR is set when init-folders mkdirs
 ├── etc/s6-overlay/s6-rc.d/init-wait-for-redis/dependencies.d/svc-redis          # Make paperless's Redis-readiness wait for ours to come up
 ├── etc/s6-overlay/s6-rc.d/user/contents.d/svc-redis                # Enable in default bundle
 ├── etc/s6-overlay/s6-rc.d/user/contents.d/init-openhost-bootstrap  # Enable in default bundle

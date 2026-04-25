@@ -6,29 +6,42 @@
 # Runs once per boot, before any of Paperless's own init oneshots.
 # Responsibilities:
 #
-#   1. Move (via symlink) the four state directories that the upstream
-#      image expects under /usr/src/paperless/{data,media,consume,export}
-#      to live under $OPENHOST_APP_DATA_DIR instead, so they survive
-#      container re-creation. Paperless's `init-folders` oneshot will
-#      then mkdir/chown the *targets* (which is fine — chown follows
-#      symlinks).
+#   1. Point Paperless's data dirs at $OPENHOST_APP_DATA_DIR by
+#      exporting PAPERLESS_DATA_DIR / PAPERLESS_MEDIA_ROOT /
+#      PAPERLESS_CONSUMPTION_DIR into the s6 container_environment.
+#      The upstream image declares /usr/src/paperless/{data,media,
+#      consume,export} as VOLUMEs, so we *cannot* symlink those paths
+#      away — they're mountpoints. Setting the env vars makes
+#      Paperless's Django settings module read the persistent paths
+#      directly, leaving the (anonymous) VOLUME mountpoints
+#      unreferenced.
 #
-#   2. On first boot only, generate a random password for the
-#      `operator` superuser, write it to
-#      $OPENHOST_APP_DATA_DIR/admin-password.txt mode 0600, and stamp
-#      PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD into
-#      /run/s6/container_environment so the upstream `init-superuser`
-#      oneshot (which is idempotent) creates the account. A sentinel
-#      `.admin_bootstrapped` makes this a no-op on later boots so an
-#      admin password change through the UI is not silently reverted.
+#      The export dir is left at its volume default (/usr/src/paperless/
+#      export) because Paperless does not expose an env var override
+#      for it. Export staging is throwaway data, so this is fine; an
+#      operator who runs `manage.py document_exporter` from the
+#      paperless shell will get output in the anonymous volume and
+#      can copy it elsewhere.
+#
+#   2. On first boot only, generate a 32-character random password
+#      for the `operator` superuser, write it to
+#      $OPENHOST_APP_DATA_DIR/admin-password.txt mode 0600, and
+#      export PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD into
+#      the container_environment so that the upstream `init-superuser`
+#      oneshot (idempotent — `manage.py manage_superuser` only creates
+#      the account if it doesn't already exist) creates the account.
+#      A sentinel `.admin_bootstrapped` makes this a no-op on later
+#      boots so an operator who later changes the admin password
+#      through the Paperless UI does not have it silently reverted.
 #
 #   3. Stamp PAPERLESS_URL / PAPERLESS_ALLOWED_HOSTS /
-#      PAPERLESS_CSRF_TRUSTED_ORIGINS into the contenv from
-#      $OPENHOST_ZONE_DOMAIN. Paperless's Django frontend will reject
-#      requests with a Host: paperless-ngx.<zone> header otherwise.
+#      PAPERLESS_CSRF_TRUSTED_ORIGINS into the container_environment
+#      from $OPENHOST_ZONE_DOMAIN so Django accepts the incoming
+#      Host: paperless-ngx.<zone> header.
 #
-# We deliberately keep all OpenHost-specific knowledge in this one
-# script; everything else in the image is stock paperless-ngx.
+# All OpenHost-specific knowledge lives in this one script.
+# Everything else in the image is stock paperless-ngx (modulo our
+# Redis sidecar service).
 
 set -euo pipefail
 
@@ -44,10 +57,10 @@ log() { echo "[init-openhost-bootstrap] $*"; }
 DATA_ROOT="${OPENHOST_APP_DATA_DIR:-/data}"
 mkdir -p "${DATA_ROOT}"
 
-# The contenv directory is where s6 writes per-container env vars. Any
-# file we drop here is exported into the environment of every later
-# service via /command/with-contenv. This is the s6-overlay v3 way of
-# passing values from a oneshot to a longrun.
+# The contenv directory is where s6 records per-container env vars.
+# Any file we drop here is exported into the environment of every
+# later service started via /command/with-contenv. This is the
+# s6-overlay v3 way of passing values from a oneshot to a longrun.
 #
 # Reference: https://github.com/just-containers/s6-overlay#container-environment
 CONTENV_DIR="/run/s6/container_environment"
@@ -55,8 +68,8 @@ mkdir -p "${CONTENV_DIR}"
 
 # Helper: write a single env var into the contenv. The file name is
 # the var name; the file contents are the value with no trailing
-# newline. We use printf %s rather than echo so embedded "\n" or "-n"
-# in a password don't get interpreted.
+# newline. We use printf %s rather than echo so embedded "-n" or
+# escape sequences in a generated password don't get interpreted.
 contenv_set() {
     local name="$1"
     local value="$2"
@@ -64,74 +77,41 @@ contenv_set() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Relocate paperless's state dirs into $OPENHOST_APP_DATA_DIR.
-#
-# The upstream image's init-folders / init-migrations / search-index
-# oneshots all key off PAPERLESS_DATA_DIR / PAPERLESS_MEDIA_ROOT /
-# PAPERLESS_CONSUMPTION_DIR for their target directories. We could
-# just set those env vars and have paperless write directly under
-# $DATA_ROOT, but the *defaults* compiled into Paperless's settings
-# point at /usr/src/paperless/{data,media,consume,export}; setting
-# the env vars only rewires Paperless's own code, not, e.g., the
-# nltk_data fallback or any third-party tool that hardcoded a path.
-#
-# Symlinking the paths is the conservative choice: every reference
-# to /usr/src/paperless/<name> — whether by env-aware code or by a
-# hard-coded path — transparently lands in $DATA_ROOT/<name>.
+# 1. Persistent storage layout under $OPENHOST_APP_DATA_DIR.
 # ---------------------------------------------------------------------------
 
-for name in data media consume export; do
-    src_path="/usr/src/paperless/${name}"
-    dest_path="${DATA_ROOT}/${name}"
+PERSIST_DATA="${DATA_ROOT}/data"
+PERSIST_MEDIA="${DATA_ROOT}/media"
+PERSIST_CONSUME="${DATA_ROOT}/consume"
 
-    mkdir -p "${dest_path}"
-    # Make sure paperless (uid 1000) can write there. The OPENHOST_APP_DATA_DIR
-    # mount itself is owned by container-root under rootless podman; the
-    # subdirs we create are inheriting that, so we explicitly chown.
-    chown -R paperless:paperless "${dest_path}"
+mkdir -p "${PERSIST_DATA}" "${PERSIST_MEDIA}" "${PERSIST_CONSUME}"
 
-    if [ -L "${src_path}" ]; then
-        # Already symlinked from a previous boot — just verify the
-        # target. If $OPENHOST_APP_DATA_DIR ever changes (it shouldn't,
-        # but defense in depth) we re-link.
-        current_target=$(readlink "${src_path}")
-        if [ "${current_target}" != "${dest_path}" ]; then
-            log "Re-pointing symlink ${src_path} -> ${dest_path} (was ${current_target})"
-            rm -f "${src_path}"
-            ln -s "${dest_path}" "${src_path}"
-        fi
-    else
-        # First boot: directory exists from the image build with
-        # placeholder contents. Move any pre-existing files into the
-        # persistent dir (typically empty, but be defensive) and
-        # replace with a symlink.
-        if [ -d "${src_path}" ]; then
-            # Use cp -a + rm to handle the cross-filesystem case (the
-            # OPENHOST_APP_DATA_DIR mount is on a different fs than
-            # the container's overlay, so `mv` would fall back to
-            # cp+rm anyway and we'd rather be explicit).
-            shopt -s dotglob nullglob
-            existing=("${src_path}"/*)
-            shopt -u dotglob nullglob
-            if [ "${#existing[@]}" -gt 0 ]; then
-                log "Migrating contents of ${src_path} into ${dest_path}"
-                cp -a "${existing[@]}" "${dest_path}/" 2>/dev/null || true
-            fi
-            rm -rf "${src_path}"
-        fi
-        ln -s "${dest_path}" "${src_path}"
-        log "Linked ${src_path} -> ${dest_path}"
-    fi
-done
+# Make sure the paperless user (uid 1000 inside the container) can
+# write to these dirs. The OPENHOST_APP_DATA_DIR mount is owned by
+# container-root under rootless podman; we delegate ownership to the
+# paperless account which runs the actual webserver / celery / consumer
+# processes.
+#
+# On rootless podman, chown of a userns-mapped subdir to uid 1000
+# remaps to host (subuid_offset + 1000). Because we are
+# in-container-root we are allowed to perform this remap.
+chown -R paperless:paperless "${PERSIST_DATA}" "${PERSIST_MEDIA}" "${PERSIST_CONSUME}"
+
+# Wire Paperless to read from these paths. Paperless's Django
+# settings.py respects all three of these env vars at startup
+# (settings.py: __get_path("PAPERLESS_DATA_DIR", ...) etc).
+contenv_set PAPERLESS_DATA_DIR        "${PERSIST_DATA}"
+contenv_set PAPERLESS_MEDIA_ROOT      "${PERSIST_MEDIA}"
+contenv_set PAPERLESS_CONSUMPTION_DIR "${PERSIST_CONSUME}"
 
 # ---------------------------------------------------------------------------
 # 2. URL / Host / CSRF config from $OPENHOST_ZONE_DOMAIN.
 #
 # OpenHost routes https://paperless-ngx.<zone>/* into our container.
 # Django's ALLOWED_HOSTS check rejects a Host header it doesn't
-# recognise, and Django's CSRF middleware rejects POSTs whose Origin
-# isn't in CSRF_TRUSTED_ORIGINS. We feed those settings from the env
-# OpenHost gives us.
+# recognise (returns 400), and Django's CSRF middleware rejects
+# POSTs whose Origin isn't in CSRF_TRUSTED_ORIGINS (returns 403).
+# Set both from the env OpenHost gives us.
 # ---------------------------------------------------------------------------
 
 ZONE_DOMAIN="${OPENHOST_ZONE_DOMAIN:-}"
@@ -156,15 +136,11 @@ if [ -n "${ZONE_DOMAIN}" ]; then
     esac
 
     # PAPERLESS_URL is the canonical absolute base URL the frontend
-    # uses for redirects, password-reset emails, etc. PAPERLESS_ALLOWED_HOSTS
-    # must include the bare hostname (no scheme). PAPERLESS_CSRF_TRUSTED_ORIGINS
-    # *must* include scheme. See:
-    #   https://docs.paperless-ngx.com/configuration/#hosting-and-security
+    # uses for redirects, password-reset emails, etc.
+    # PAPERLESS_ALLOWED_HOSTS must include the bare hostname (no
+    # scheme). PAPERLESS_CSRF_TRUSTED_ORIGINS *must* include scheme.
+    # See: https://docs.paperless-ngx.com/configuration/#hosting-and-security
     contenv_set PAPERLESS_URL "${BASE_URL}"
-    # Allow both the apex hostname (production) and "localhost" (so the
-    # router's internal health check by IP+Host: paperless-ngx still
-    # passes if it ever sets Host explicitly — Granian binds 0.0.0.0
-    # so by default it accepts whatever Host the router forwards).
     contenv_set PAPERLESS_ALLOWED_HOSTS "${HOSTNAME},localhost,127.0.0.1"
     contenv_set PAPERLESS_CSRF_TRUSTED_ORIGINS "${BASE_URL}"
 
@@ -177,13 +153,15 @@ fi
 # 3. Admin user bootstrap.
 #
 # We create a single `operator` superuser on first boot only. The
-# upstream `init-superuser` oneshot (which we depend on running after
-# us) reads PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD from the
-# env and runs `manage.py manage_superuser`, which is idempotent —
-# it won't change the password of an existing user, so leaving the
-# env vars set across boots would be safe, but we also drop a sentinel
-# so a future operator can rotate the password from the UI without
-# us silently reverting it on restart.
+# upstream `init-superuser` oneshot (which transitively runs after us
+# via the init-folders → init-migrations → init-superuser dep chain)
+# reads PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD from the env
+# and runs `manage.py manage_superuser`, which is idempotent — it
+# won't change the password of an existing user, so leaving the env
+# vars set across boots is safe. We additionally drop a sentinel so
+# a future operator can rotate the password from the UI without us
+# silently reverting it on restart (we stop exporting PAPERLESS_ADMIN_*
+# once the sentinel is present).
 # ---------------------------------------------------------------------------
 
 ADMIN_PASSWORD_FILE="${DATA_ROOT}/admin-password.txt"
@@ -193,10 +171,10 @@ ADMIN_USER="operator"
 if [ ! -f "${SENTINEL}" ]; then
     log "First boot: generating ${ADMIN_USER} password"
 
-    # 24 random bytes -> ~32 chars of base64url (no padding, no
-    # ambiguous chars). /dev/urandom is the cryptographically secure
-    # source on Linux. We avoid `head -c` on /dev/urandom + base64
-    # piping issues by reading exactly the bytes we want with dd.
+    # 24 random bytes -> ~32 chars of base64url. /dev/urandom is the
+    # cryptographically secure source on Linux. We avoid `head -c` on
+    # /dev/urandom (which can read short under signal interrupts) by
+    # reading exactly the bytes we want with dd.
     ADMIN_PASSWORD=$(dd if=/dev/urandom bs=24 count=1 status=none \
         | base64 \
         | tr -d '\n=+/' \
@@ -212,9 +190,6 @@ if [ ! -f "${SENTINEL}" ]; then
 
     contenv_set PAPERLESS_ADMIN_USER "${ADMIN_USER}"
     contenv_set PAPERLESS_ADMIN_PASSWORD "${ADMIN_PASSWORD}"
-    # PAPERLESS_ADMIN_MAIL has a default in the Dockerfile; the contenv
-    # value will override the Dockerfile's ENV value if anything later
-    # reads it from the contenv dir.
 
     # Drop the sentinel last, so a crash mid-bootstrap on first boot
     # leaves us re-trying on the next boot rather than silently never
