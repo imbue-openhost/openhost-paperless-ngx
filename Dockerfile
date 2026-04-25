@@ -97,7 +97,18 @@ ENV PAPERLESS_DBENGINE=sqlite \
     PAPERLESS_TASK_WORKERS=1 \
     PAPERLESS_THREADS_PER_WORKER=1 \
     PAPERLESS_ADMIN_MAIL=operator@localhost \
-    PAPERLESS_PORT=8000
+    PAPERLESS_PORT=8000 \
+    # Trust the X-Forwarded-Host / X-Forwarded-Proto headers set by
+    # the OpenHost router. Without these, Django's CSRF middleware
+    # sees request.scheme == 'http' (the in-pod connection) but the
+    # Origin/Referer headers say 'https' (the user-facing scheme),
+    # rejects the mismatch, and returns 403 on every POST including
+    # the login form. The PAPERLESS_PROXY_SSL_HEADER value is a JSON
+    # array that maps to Django's SECURE_PROXY_SSL_HEADER tuple
+    # (header name, expected value) — when X-Forwarded-Proto is
+    # 'https', Django treats the request as secure.
+    PAPERLESS_USE_X_FORWARD_HOST=true \
+    PAPERLESS_PROXY_SSL_HEADER='["HTTP_X_FORWARDED_PROTO","https"]'
 
 # Re-declare EXPOSE for clarity (already declared upstream); the
 # OpenHost router proxies to this port over loopback inside the pod.
