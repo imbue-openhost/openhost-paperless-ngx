@@ -48,13 +48,15 @@ On first boot the bootstrap script generates a random 32-character password for 
 
 You can change the password through Paperless's UI (Settings → Users → operator) afterwards. The bootstrap will not overwrite it on later boots — it's gated by the `.admin_bootstrapped` sentinel.
 
-If you ever lose the password, delete the sentinel + password file and reload the app:
+If you ever lose the password, the simplest recovery is to reset it through Paperless's own management command. Connect to the host's terminal and:
 
 ```bash
-oh app reload paperless-ngx
+# From the OpenHost host (replace the container ID with the running paperless-ngx container's):
+podman exec -it $(podman ps --filter name=paperless-ngx --format '{{.ID}}') \
+    python3 /usr/src/paperless/src/manage.py changepassword operator
 ```
 
-A new random password will be generated and the existing user's password updated to match (paperless's `manage_superuser` updates passwords for existing users).
+The command will prompt twice for a new password and update the database in place. (Note: re-running our bootstrap by deleting the sentinel will *not* reset an existing user's password — paperless's `manage_superuser` is create-only by design and skips the user if the username already exists. Our sentinel only suppresses re-entering the env vars on later boots; it does not authoritatively manage the database state.)
 
 ## Authentication and SSO
 

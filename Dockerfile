@@ -26,8 +26,11 @@
 #          because the upstream Dockerfile declares those paths as
 #          VOLUMEs and they become live mountpoints in the running
 #          container.)
-#        * on first boot only, generates a 24-byte random password
-#          for the `operator` superuser, writes it to
+#        * on first boot only, generates a 32-character random
+#          password for the `operator` superuser (sourced from
+#          /dev/urandom and stripped of base64 padding/special chars
+#          to keep it ASCII-alphanumeric for easy copy/paste),
+#          writes it to
 #          $OPENHOST_APP_DATA_DIR/admin-password.txt with mode 0600,
 #          and exports PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD
 #          into the contenv so the upstream `init-superuser` oneshot

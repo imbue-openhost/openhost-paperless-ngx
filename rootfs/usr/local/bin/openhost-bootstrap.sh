@@ -156,12 +156,23 @@ fi
 # upstream `init-superuser` oneshot (which transitively runs after us
 # via the init-folders → init-migrations → init-superuser dep chain)
 # reads PAPERLESS_ADMIN_USER / PAPERLESS_ADMIN_PASSWORD from the env
-# and runs `manage.py manage_superuser`, which is idempotent — it
-# won't change the password of an existing user, so leaving the env
-# vars set across boots is safe. We additionally drop a sentinel so
-# a future operator can rotate the password from the UI without us
-# silently reverting it on restart (we stop exporting PAPERLESS_ADMIN_*
-# once the sentinel is present).
+# and runs `manage.py manage_superuser`, which is *create-only* —
+# the upstream command explicitly returns early if the username is
+# taken or any superuser already exists (see paperless-ngx
+# src/documents/management/commands/manage_superuser.py). That means:
+#
+#   - The sentinel-based "skip on later boots" behaviour matches the
+#     upstream command's actual semantics: even if we did re-export
+#     PAPERLESS_ADMIN_PASSWORD with a new value, it would be ignored.
+#   - Recovery from a lost admin password is *not* "delete the
+#     sentinel and reload". An operator has to use
+#     `manage.py changepassword operator` (run via `podman exec` on
+#     the host or through Paperless's UI). The README documents this.
+#
+# The sentinel still serves as a defence-in-depth marker — if a
+# future paperless-ngx release made manage_superuser update the
+# password for an existing user (it doesn't today), we would *not*
+# want to silently re-roll the operator password on every boot.
 # ---------------------------------------------------------------------------
 
 ADMIN_PASSWORD_FILE="${DATA_ROOT}/admin-password.txt"
@@ -171,14 +182,25 @@ ADMIN_USER="operator"
 if [ ! -f "${SENTINEL}" ]; then
     log "First boot: generating ${ADMIN_USER} password"
 
-    # 24 random bytes -> ~32 chars of base64url. /dev/urandom is the
-    # cryptographically secure source on Linux. We avoid `head -c` on
-    # /dev/urandom (which can read short under signal interrupts) by
-    # reading exactly the bytes we want with dd.
-    ADMIN_PASSWORD=$(dd if=/dev/urandom bs=24 count=1 status=none \
+    # We want a stable 32-character ASCII-letter-and-digit password.
+    # Naïve base64 of 24 random bytes is exactly 32 chars but contains
+    # `+` and `/`, which we strip — and after stripping, the result is
+    # typically shorter than 32. Read enough source entropy (96 random
+    # bytes -> 128 base64 chars; on average about 122 survive the strip)
+    # that the post-strip output is overwhelmingly likely to be at least
+    # 32 chars, then `cut -c1-32` gives a stable-length string. We
+    # additionally validate the length and refuse to start the container
+    # if anything goes wrong (would only happen if /dev/urandom or
+    # base64 is broken, but better to fail loudly than silently mint a
+    # short-and-weak admin password).
+    ADMIN_PASSWORD=$(dd if=/dev/urandom bs=96 count=1 status=none \
         | base64 \
         | tr -d '\n=+/' \
         | cut -c1-32)
+    if [ "${#ADMIN_PASSWORD}" -lt 32 ]; then
+        log "ERROR: generated password is only ${#ADMIN_PASSWORD} chars (expected 32)"
+        exit 1
+    fi
 
     # Write the password file *before* exporting the env vars. If the
     # write fails (e.g. disk full), we'd rather refuse to start than
