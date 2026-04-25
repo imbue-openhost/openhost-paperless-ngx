@@ -118,7 +118,10 @@ ZONE_DOMAIN="${OPENHOST_ZONE_DOMAIN:-}"
 APP_NAME="${OPENHOST_APP_NAME:-paperless-ngx}"
 
 if [ -n "${ZONE_DOMAIN}" ]; then
-    HOSTNAME="${APP_NAME}.${ZONE_DOMAIN}"
+    # Use APP_HOSTNAME, not HOSTNAME — bash auto-sets $HOSTNAME to
+    # the machine's hostname, and shadowing that variable would
+    # confuse anyone reading this script later.
+    APP_HOSTNAME="${APP_NAME}.${ZONE_DOMAIN}"
 
     case "${ZONE_DOMAIN}" in
         lvh.me|*.lvh.me|localhost|*.localhost)
@@ -128,10 +131,10 @@ if [ -n "${ZONE_DOMAIN}" ]; then
             if [ -n "${OPENHOST_ROUTER_URL:-}" ]; then
                 ROUTER_PORT=$(printf '%s' "${OPENHOST_ROUTER_URL}" | sed -n 's/.*:\([0-9]*\).*/\1/p')
             fi
-            BASE_URL="http://${HOSTNAME}${ROUTER_PORT:+:$ROUTER_PORT}"
+            BASE_URL="http://${APP_HOSTNAME}${ROUTER_PORT:+:$ROUTER_PORT}"
             ;;
         *)
-            BASE_URL="https://${HOSTNAME}"
+            BASE_URL="https://${APP_HOSTNAME}"
             ;;
     esac
 
@@ -141,7 +144,7 @@ if [ -n "${ZONE_DOMAIN}" ]; then
     # scheme). PAPERLESS_CSRF_TRUSTED_ORIGINS *must* include scheme.
     # See: https://docs.paperless-ngx.com/configuration/#hosting-and-security
     contenv_set PAPERLESS_URL "${BASE_URL}"
-    contenv_set PAPERLESS_ALLOWED_HOSTS "${HOSTNAME},localhost,127.0.0.1"
+    contenv_set PAPERLESS_ALLOWED_HOSTS "${APP_HOSTNAME},localhost,127.0.0.1"
     contenv_set PAPERLESS_CSRF_TRUSTED_ORIGINS "${BASE_URL}"
 
     log "Configured PAPERLESS_URL=${BASE_URL}"
@@ -237,7 +240,21 @@ else
     TMP_PASSWORD_FILE="${ADMIN_PASSWORD_FILE}.tmp"
     printf '%s\n' "${ADMIN_PASSWORD}" > "${TMP_PASSWORD_FILE}"
     chmod 0600 "${TMP_PASSWORD_FILE}"
-    sync "${TMP_PASSWORD_FILE}" 2>/dev/null || true
+    # fsync the temp file before the rename, so a crash between the
+    # write and the rename never produces a partial password file.
+    # On crash before sync completes: no $ADMIN_PASSWORD_FILE at all
+    # (the .tmp file may exist but is never read by us), so the next
+    # boot takes the first-boot path and writes a fresh password.
+    # On crash after rename: $ADMIN_PASSWORD_FILE exists, sentinel
+    # absent — the recovery branch above picks up the existing
+    # password.
+    #
+    # We deliberately do NOT silence sync failures with `|| true`:
+    # if the kernel reports an I/O error on this file, we want the
+    # bootstrap to fail loudly rather than continue to the rename
+    # and end up with a password file that is not actually durable.
+    # `set -e` is in effect.
+    sync "${TMP_PASSWORD_FILE}"
     mv "${TMP_PASSWORD_FILE}" "${ADMIN_PASSWORD_FILE}"
 
     contenv_set PAPERLESS_ADMIN_USER "${ADMIN_USER}"

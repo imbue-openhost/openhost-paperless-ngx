@@ -74,13 +74,18 @@ Future work: write a small auth-proxy sidecar (à la openhost-forgejo) that sets
 
 All [Paperless env vars](https://docs.paperless-ngx.com/configuration/) work as documented upstream. Defaults set by this image:
 
-| Var                      | Default                          | Notes                                            |
-|--------------------------|----------------------------------|--------------------------------------------------|
-| `PAPERLESS_DBENGINE`     | `sqlite`                         | Override to `postgresql` if pointing at external DB |
-| `PAPERLESS_REDIS`        | `redis://127.0.0.1:6379`         | The bundled Redis                                |
-| `PAPERLESS_OCR_LANGUAGE` | `eng`                            | Add more with `eng+deu` etc; the upstream image bundles English/German/French/Italian/Spanish |
-| `PAPERLESS_TIME_ZONE`    | `UTC`                            | Set to your local IANA TZ for correct timestamps |
-| `PAPERLESS_TASK_WORKERS` | `1`                              | Bumping needs a corresponding `cpu_millicores` increase |
+| Var                              | Default                                          | Notes                                            |
+|----------------------------------|--------------------------------------------------|--------------------------------------------------|
+| `PAPERLESS_DBENGINE`             | `sqlite`                                         | Override to `postgresql` if pointing at external DB |
+| `PAPERLESS_REDIS`                | `redis://127.0.0.1:6379`                         | The bundled Redis                                |
+| `PAPERLESS_OCR_LANGUAGE`         | `eng`                                            | Add more with `eng+deu` etc; the upstream image bundles English/German/French/Italian/Spanish |
+| `PAPERLESS_TIME_ZONE`            | `UTC`                                            | Set to your local IANA TZ for correct timestamps |
+| `PAPERLESS_TASK_WORKERS`         | `1`                                              | Number of celery worker processes; raise alongside `cpu_millicores` |
+| `PAPERLESS_THREADS_PER_WORKER`   | `1`                                              | OCR threads per worker                           |
+| `PAPERLESS_ADMIN_MAIL`           | `operator@localhost`                             | Email for the auto-created `operator` superuser  |
+| `PAPERLESS_PORT`                 | `8000`                                           | Granian listen port (matches manifest)           |
+| `PAPERLESS_USE_X_FORWARD_HOST`   | `true`                                           | Trust `X-Forwarded-Host` from the OpenHost router |
+| `PAPERLESS_PROXY_SSL_HEADER`     | `["HTTP_X_FORWARDED_PROTO","https"]`             | Tell Django the request was HTTPS so CSRF passes |
 
 `PAPERLESS_URL`, `PAPERLESS_ALLOWED_HOSTS`, and `PAPERLESS_CSRF_TRUSTED_ORIGINS` are derived automatically from `$OPENHOST_ZONE_DOMAIN` at boot.
 
