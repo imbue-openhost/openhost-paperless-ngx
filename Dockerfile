@@ -93,6 +93,16 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/svc-redis/run \
 # overridable; if an operator wants to point at an external Postgres
 # they can set PAPERLESS_DBENGINE / PAPERLESS_DBHOST / etc. via
 # OpenHost's app env machinery and we'll honour it.
+# Trust the X-Forwarded-Host / X-Forwarded-Proto headers set by the
+# OpenHost router (Caddy). Without these, Django's CSRF middleware
+# sees request.scheme == 'http' (the in-pod TCP connection from
+# Caddy to our container) but the Origin/Referer headers say 'https'
+# (the user-facing scheme that survived TLS termination), rejects
+# the mismatch, and returns 403 on every POST including the login
+# form. PAPERLESS_PROXY_SSL_HEADER is a JSON array that maps to
+# Django's SECURE_PROXY_SSL_HEADER tuple (header name, expected
+# value) — when X-Forwarded-Proto is 'https', Django treats the
+# request as secure.
 ENV PAPERLESS_DBENGINE=sqlite \
     PAPERLESS_REDIS=redis://127.0.0.1:6379 \
     PAPERLESS_OCR_LANGUAGE=eng \
@@ -101,15 +111,6 @@ ENV PAPERLESS_DBENGINE=sqlite \
     PAPERLESS_THREADS_PER_WORKER=1 \
     PAPERLESS_ADMIN_MAIL=operator@localhost \
     PAPERLESS_PORT=8000 \
-    # Trust the X-Forwarded-Host / X-Forwarded-Proto headers set by
-    # the OpenHost router. Without these, Django's CSRF middleware
-    # sees request.scheme == 'http' (the in-pod connection) but the
-    # Origin/Referer headers say 'https' (the user-facing scheme),
-    # rejects the mismatch, and returns 403 on every POST including
-    # the login form. The PAPERLESS_PROXY_SSL_HEADER value is a JSON
-    # array that maps to Django's SECURE_PROXY_SSL_HEADER tuple
-    # (header name, expected value) — when X-Forwarded-Proto is
-    # 'https', Django treats the request as secure.
     PAPERLESS_USE_X_FORWARD_HOST=true \
     PAPERLESS_PROXY_SSL_HEADER='["HTTP_X_FORWARDED_PROTO","https"]'
 

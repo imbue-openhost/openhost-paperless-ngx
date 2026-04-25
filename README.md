@@ -44,7 +44,9 @@ The bootstrap wires Paperless to these locations by setting `PAPERLESS_DATA_DIR`
 
 ## Logging in
 
-On first boot the bootstrap script generates a random 32-character password for the `operator` superuser and writes it to `$OPENHOST_APP_DATA_DIR/admin-password.txt`. To retrieve it from the host, ssh into the OpenHost VM and `cat /data/app_data/paperless-ngx/admin-password.txt` (the path may differ if your OpenHost data root has been remapped).
+On first boot the bootstrap script generates a random 32-character password for the `operator` superuser and writes it to `$OPENHOST_APP_DATA_DIR/admin-password.txt`. To retrieve it from the host, ssh into the OpenHost VM and `cat ~/.openhost/local_compute_space/persistent_data/app_data/paperless-ngx/admin-password.txt` (the exact path varies with your OpenHost installation; the dashboard's "App data" link points at the right directory).
+
+If you run the image outside OpenHost (e.g. `docker run` for testing) without setting `OPENHOST_APP_DATA_DIR`, the bootstrap falls back to `/data/admin-password.txt` inside the container, so mount a volume there to retrieve the password.
 
 You can change the password through Paperless's UI (Settings → Users → operator) afterwards. The bootstrap will not overwrite it on later boots — it's gated by the `.admin_bootstrapped` sentinel.
 

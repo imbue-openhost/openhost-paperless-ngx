@@ -179,7 +179,31 @@ ADMIN_PASSWORD_FILE="${DATA_ROOT}/admin-password.txt"
 SENTINEL="${DATA_ROOT}/.admin_bootstrapped"
 ADMIN_USER="operator"
 
-if [ ! -f "${SENTINEL}" ]; then
+if [ -f "${SENTINEL}" ]; then
+    log "Admin already bootstrapped (sentinel ${SENTINEL} exists); skipping"
+elif [ -f "${ADMIN_PASSWORD_FILE}" ]; then
+    # Defence in depth: if the password file already exists but the
+    # sentinel does not, a previous boot crashed *between* writing
+    # the password file and writing the sentinel. The DB may or may
+    # not contain the operator account at this point. Either way, we
+    # do NOT want to overwrite the existing password file with a new
+    # random string — paperless's manage_superuser is create-only,
+    # so a re-rolled password would NOT update the operator account
+    # in the DB and we'd silently lock the operator out. Instead,
+    # re-export the existing password to the contenv (so init-superuser
+    # can finish creating the account if it didn't on the previous
+    # boot) and stamp the sentinel.
+    log "Recovering from interrupted previous bootstrap (password file present, sentinel missing)"
+    EXISTING_PASSWORD=$(head -1 "${ADMIN_PASSWORD_FILE}")
+    if [ -z "${EXISTING_PASSWORD}" ]; then
+        log "ERROR: ${ADMIN_PASSWORD_FILE} exists but is empty; aborting bootstrap"
+        exit 1
+    fi
+    contenv_set PAPERLESS_ADMIN_USER "${ADMIN_USER}"
+    contenv_set PAPERLESS_ADMIN_PASSWORD "${EXISTING_PASSWORD}"
+    touch "${SENTINEL}"
+    log "Recovered: re-exported existing admin credentials and stamped sentinel"
+else
     log "First boot: generating ${ADMIN_USER} password"
 
     # We want a stable 32-character ASCII-letter-and-digit password.
@@ -187,12 +211,12 @@ if [ ! -f "${SENTINEL}" ]; then
     # `+` and `/`, which we strip — and after stripping, the result is
     # typically shorter than 32. Read enough source entropy (96 random
     # bytes -> 128 base64 chars; on average about 122 survive the strip)
-    # that the post-strip output is overwhelmingly likely to be at least
-    # 32 chars, then `cut -c1-32` gives a stable-length string. We
-    # additionally validate the length and refuse to start the container
-    # if anything goes wrong (would only happen if /dev/urandom or
-    # base64 is broken, but better to fail loudly than silently mint a
-    # short-and-weak admin password).
+    # that the post-strip output is overwhelmingly likely to be at
+    # least 32 chars, then `cut -c1-32` gives a stable-length string.
+    # We additionally validate the length and refuse to start if
+    # something goes wrong (would only happen if /dev/urandom or
+    # base64 is broken, but better to fail loudly than silently mint
+    # a short-and-weak admin password).
     ADMIN_PASSWORD=$(dd if=/dev/urandom bs=96 count=1 status=none \
         | base64 \
         | tr -d '\n=+/' \
@@ -202,24 +226,28 @@ if [ ! -f "${SENTINEL}" ]; then
         exit 1
     fi
 
-    # Write the password file *before* exporting the env vars. If the
-    # write fails (e.g. disk full), we'd rather refuse to start than
-    # have an admin account whose password is known only to the
-    # in-memory environment of this boot.
+    # Write the password file atomically: write to a temp file under
+    # the same directory, fsync to disk, then rename into place. This
+    # rules out the failure mode where a partial-write password file
+    # exists and the sentinel does not — the password file either
+    # appears fully-formed under its final name or does not appear
+    # at all. We then write the sentinel atomically too (touch is
+    # already atomic).
     umask 077
-    printf '%s\n' "${ADMIN_PASSWORD}" > "${ADMIN_PASSWORD_FILE}"
-    chmod 0600 "${ADMIN_PASSWORD_FILE}"
+    TMP_PASSWORD_FILE="${ADMIN_PASSWORD_FILE}.tmp"
+    printf '%s\n' "${ADMIN_PASSWORD}" > "${TMP_PASSWORD_FILE}"
+    chmod 0600 "${TMP_PASSWORD_FILE}"
+    sync "${TMP_PASSWORD_FILE}" 2>/dev/null || true
+    mv "${TMP_PASSWORD_FILE}" "${ADMIN_PASSWORD_FILE}"
 
     contenv_set PAPERLESS_ADMIN_USER "${ADMIN_USER}"
     contenv_set PAPERLESS_ADMIN_PASSWORD "${ADMIN_PASSWORD}"
 
-    # Drop the sentinel last, so a crash mid-bootstrap on first boot
-    # leaves us re-trying on the next boot rather than silently never
-    # creating the admin.
+    # Stamp the sentinel last. If we crash here, the password file
+    # exists on disk but no sentinel does — the recovery branch
+    # above will re-use the existing password on the next boot.
     touch "${SENTINEL}"
     log "Wrote admin credentials to ${ADMIN_PASSWORD_FILE}"
-else
-    log "Admin already bootstrapped (sentinel ${SENTINEL} exists); skipping"
 fi
 
 log "Bootstrap complete"
