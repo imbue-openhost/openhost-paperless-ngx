@@ -46,13 +46,26 @@
 #          router (which arrive with a Host header of
 #          paperless-ngx.<zone>).
 #
-# We deliberately do NOT add an auth-proxy sidecar. Paperless's auth
-# model is cookie- and CSRF-based and does not trust an upstream
-# header (without a separate plugin). An OpenHost SSO sidecar would
-# require either patching Paperless's middleware or running an
-# additional gate process; until then, the operator logs in with the
-# generated `operator` credentials, and the public_paths = ["/"] in
-# openhost.toml lets the login form be reached unauthenticated.
+# OpenHost SSO via Pattern A (trusted-header injection).
+# ------------------------------------------------------
+# A small auth-proxy sidecar (`svc-auth-proxy`) listens on the
+# OpenHost-routed port 8080, forwards to paperless on 127.0.0.1:8000,
+# and stamps `Remote-User: operator` on owner requests (those that
+# arrived with `X-OpenHost-Is-Owner: true` from the OpenHost router).
+# Paperless's `PAPERLESS_ENABLE_HTTP_REMOTE_USER=true` reads
+# HTTP_REMOTE_USER from the WSGI env and treats the named user as
+# authenticated, auto-creating the account on first sight. The
+# bootstrap ensures the `operator` superuser exists before the
+# webserver starts.
+#
+# Security: the proxy strips client-supplied `Remote-User` /
+# `X-OpenHost-*` headers before processing, so the trusted-header
+# auth is only as trustworthy as the proxy itself. The OpenHost
+# router also strips these inbound; this is defense in depth.
+#
+# /admin/ is exempt from header stamping (Django built-in admin uses
+# session auth, not REMOTE_USER); the operator falls back to the
+# admin password persisted to $OPENHOST_APP_DATA_DIR/admin-password.txt.
 
 FROM ghcr.io/paperless-ngx/paperless-ngx:latest
 
@@ -86,8 +99,10 @@ COPY rootfs/ /
 # checkout on a vfat mount or via a Windows host doesn't silently break
 # the build.)
 RUN chmod +x /etc/s6-overlay/s6-rc.d/svc-redis/run \
+             /etc/s6-overlay/s6-rc.d/svc-auth-proxy/run \
              /etc/s6-overlay/s6-rc.d/init-openhost-bootstrap/run \
-             /usr/local/bin/openhost-bootstrap.sh
+             /usr/local/bin/openhost-bootstrap.sh \
+             /usr/local/bin/auth_proxy.py
 
 # Tell paperless to use SQLite + the bundled local Redis. Operator-
 # overridable; if an operator wants to point at an external Postgres
@@ -111,12 +126,14 @@ ENV PAPERLESS_DBENGINE=sqlite \
     PAPERLESS_THREADS_PER_WORKER=1 \
     PAPERLESS_ADMIN_MAIL=operator@localhost \
     PAPERLESS_PORT=8000 \
+    PAPERLESS_BIND_ADDR=127.0.0.1 \
     PAPERLESS_USE_X_FORWARD_HOST=true \
     PAPERLESS_PROXY_SSL_HEADER='["HTTP_X_FORWARDED_PROTO","https"]'
 
-# Re-declare EXPOSE for clarity (already declared upstream); the
-# OpenHost router proxies to this port over loopback inside the pod.
-EXPOSE 8000
+# Auth-proxy listens on 8080 (the OpenHost-routed port from the
+# manifest). Paperless listens on 127.0.0.1:8000 internally; the
+# proxy is the only thing reachable from outside the container.
+EXPOSE 8080
 
 # ENTRYPOINT ["/init"] is inherited from the upstream image; s6 will
 # run our bootstrap before init-complete and start svc-redis alongside

@@ -1,19 +1,27 @@
 [app]
 name = "paperless-ngx"
-version = "0.1.0"
-description = "Paperless-ngx document management with OCR (single-container, SQLite + bundled Redis)"
+version = "0.2.0"
+description = "Paperless-ngx document management with OCR (single-container, SQLite + bundled Redis) with OpenHost SSO via trusted-header injection."
 
 [runtime.container]
 image = "Dockerfile"
-port = 8000
+# auth-proxy sidecar's listen port. Paperless's gunicorn binds
+# 127.0.0.1:8000 internally; the auth-proxy on 8080 is the only
+# port externally reachable.
+port = 8080
 
 [routing]
-health_check = "/accounts/login/"
-# Paperless has its own user system (not header-friendly for SSO), so we
-# expose every path publicly and let Paperless's own login form handle
-# authentication. The owner can log in with the admin credentials written
-# to $OPENHOST_APP_DATA_DIR/admin-password.txt on first boot.
-public_paths = ["/"]
+# auth-proxy serves a static 200 on /_healthz immediately, so
+# OpenHost's health probe succeeds during paperless cold-start
+# (Django migrations + Whoosh index build can take 60-120s before
+# /accounts/login/ would respond).
+health_check = "/_healthz"
+# No public paths — paperless has no public-share concept; the
+# OpenHost router gates everything behind zone_auth, and the
+# auth-proxy auto-logs-in the owner. Anonymous visitors who
+# somehow reach paperless (e.g. a misconfiguration) will hit
+# paperless's own login form via its REMOTE_USER fallback path.
+public_paths = []
 
 [resources]
 # Paperless is heavy: it bundles a webserver, two celery workers, a

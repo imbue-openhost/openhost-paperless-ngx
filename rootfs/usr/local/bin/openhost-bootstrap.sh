@@ -105,6 +105,45 @@ contenv_set PAPERLESS_MEDIA_ROOT      "${PERSIST_MEDIA}"
 contenv_set PAPERLESS_CONSUMPTION_DIR "${PERSIST_CONSUME}"
 
 # ---------------------------------------------------------------------------
+# 1b. Bind paperless's webserver to loopback so the auth-proxy is the
+#     only thing on the OpenHost-routed port.
+#
+# The auth-proxy listens on 0.0.0.0:8080 (the OpenHost manifest's
+# `port`) and forwards to 127.0.0.1:8000 (paperless). Without binding
+# paperless to loopback, the upstream gunicorn/granian listens on
+# 0.0.0.0:8000 and only the manifest's port routing prevents direct
+# external access — defence in depth says we should also force the
+# kernel to refuse non-loopback connections to paperless.
+# ---------------------------------------------------------------------------
+contenv_set PAPERLESS_BIND_ADDR       "127.0.0.1"
+contenv_set PAPERLESS_PORT            "8000"
+
+# ---------------------------------------------------------------------------
+# 1c. Trusted-header SSO (Pattern A).
+#
+# When the OpenHost router stamps X-OpenHost-Is-Owner: true on an
+# owner request, the auth-proxy forwards `Remote-User: operator` to
+# paperless. Paperless reads HTTP_REMOTE_USER from the WSGI env
+# (Django normalises request header `Remote-User` -> HTTP_REMOTE_USER)
+# and treats the named user as authenticated.
+#
+# `_API=true` extends the same trust to /api/* routes so the
+# paperless mobile/desktop apps work behind the OpenHost router.
+# Without it, the dashboard works but the SPA's XHRs fail with 401
+# because allauth's session-only API auth backend doesn't honour
+# REMOTE_USER.
+#
+# IMPORTANT: this is safe ONLY because the auth-proxy strips any
+# client-supplied Remote-User header before any other processing
+# (see auth_proxy.py:ALWAYS_STRIP_HEADERS). Exposing
+# PAPERLESS_ENABLE_HTTP_REMOTE_USER without a header-stripping reverse
+# proxy in front would let any caller authenticate as any user.
+# ---------------------------------------------------------------------------
+contenv_set PAPERLESS_ENABLE_HTTP_REMOTE_USER     "true"
+contenv_set PAPERLESS_ENABLE_HTTP_REMOTE_USER_API "true"
+contenv_set PAPERLESS_HTTP_REMOTE_USER_HEADER_NAME "HTTP_REMOTE_USER"
+
+# ---------------------------------------------------------------------------
 # 2. URL / Host / CSRF config from $OPENHOST_ZONE_DOMAIN.
 #
 # OpenHost routes https://paperless-ngx.<zone>/* into our container.

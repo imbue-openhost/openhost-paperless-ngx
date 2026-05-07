@@ -16,11 +16,12 @@ Upstream Paperless ships as a docker-compose stack of 4–6 services (paperless 
 
 | Service                         | How it's run                                                       |
 |---------------------------------|--------------------------------------------------------------------|
-| Paperless web (Granian + Django) | upstream s6 longrun `svc-webserver`                                |
+| Paperless web (Granian + Django) | upstream s6 longrun `svc-webserver` (bound to `127.0.0.1:8000`)   |
 | Celery worker (OCR/ingest)      | upstream s6 longrun `svc-worker`                                   |
 | Celery beat (scheduler)         | upstream s6 longrun `svc-scheduler`                                |
 | Document consumer (inotify)     | upstream s6 longrun `svc-consumer`                                 |
 | Redis (Celery broker)           | **bundled** s6 longrun `svc-redis` on `127.0.0.1:6379`             |
+| OpenHost SSO auth-proxy         | **bundled** s6 longrun `svc-auth-proxy` on `0.0.0.0:8080`          |
 | Database                        | **SQLite** at `$OPENHOST_APP_DATA_DIR/data/db.sqlite3`             |
 
 Optional sidecars from the upstream compose (Tika for office docs, Gotenberg for HTML/email) are *not* included to keep the image small. The image already supports OCR for PDFs, images, and plain text — the bulk of personal-archive use cases.
@@ -62,13 +63,27 @@ The command will prompt twice for a new password and update the database in plac
 
 ## Authentication and SSO
 
-This packaging does **not** integrate with OpenHost's zone-wide SSO. Paperless's auth model is cookie- and CSRF-based and does not natively trust an upstream `X-Openhost-User` header — wiring it in would require either patching paperless's middleware or running a custom proxy that fakes a Django session. As a result:
+This packaging integrates with OpenHost's zone-wide SSO via **Pattern A — trusted-header injection** (the same pattern used by `openhost-mediawiki` and `openhost-dokuwiki`).
 
-- `public_paths = ["/"]` in the manifest exposes the whole app over HTTPS (TLS terminated by the OpenHost router).
-- Anyone with the URL can reach the login form, but cannot do anything without the `operator` password.
-- Paperless's own user system (Settings → Users) is the source of truth for authentication.
+How it works:
 
-Future work: write a small auth-proxy sidecar (à la openhost-forgejo) that sets a Django session cookie when the OpenHost owner JWT is present.
+1. The OpenHost router verifies the visitor's `zone_auth` JWT and stamps `X-OpenHost-Is-Owner: true` on owner requests before they reach the container.
+2. A small Python auth-proxy sidecar (`svc-auth-proxy`) listens on the OpenHost-routed port (`8080`), strips any client-supplied `Remote-User` / `X-OpenHost-*` headers (defense in depth), and on owner requests forwards `Remote-User: operator` to paperless on `127.0.0.1:8000`.
+3. Paperless's `PAPERLESS_ENABLE_HTTP_REMOTE_USER=true` reads `HTTP_REMOTE_USER` from the WSGI environment (Django sources this from the request header `Remote-User`) and treats the named user as authenticated, auto-creating the account on first sight if missing. The bootstrap ensures the `operator` superuser already exists.
+
+The result: the OpenHost owner clicks paperless's tile in the dashboard, the auth-proxy stamps the trusted header, and they land directly on paperless's document list — no login form.
+
+`PAPERLESS_ENABLE_HTTP_REMOTE_USER_API=true` extends the same trust to `/api/*` so the paperless mobile/desktop apps work behind the OpenHost router too (same JWT-gated routing applies).
+
+### Security
+
+Pattern A is only as secure as the proxy in front of it. We strip every variant of the trust header on every inbound request, regardless of source, before any other processing. Anyone bypassing the OpenHost router and reaching the container directly would still be unable to inject a `Remote-User` header without first compromising the auth-proxy itself.
+
+**`/admin/` is exempt** from header stamping. Django's built-in admin uses session auth (it doesn't honour `REMOTE_USER`), so stamping there would surface a logged-out form anyway. The `operator` password persisted to `$OPENHOST_APP_DATA_DIR/admin-password.txt` lets you reach `/admin/` if you ever need it.
+
+### Break-glass
+
+If for some reason the auth-proxy refuses to log you in (header stripped, malformed JWT, paperless DB out of sync), you can still reach paperless's native login form at `/accounts/login/` via the auth-proxy and sign in manually with the `operator` password from `admin-password.txt`. Paperless's `PAPERLESS_ENABLE_HTTP_REMOTE_USER` adds REMOTE_USER as an authentication backend without removing the username/password backend.
 
 ## Configuration
 
@@ -83,9 +98,13 @@ All [Paperless env vars](https://docs.paperless-ngx.com/configuration/) work as 
 | `PAPERLESS_TASK_WORKERS`         | `1`                                              | Number of celery worker processes; raise alongside `cpu_millicores` |
 | `PAPERLESS_THREADS_PER_WORKER`   | `1`                                              | OCR threads per worker                           |
 | `PAPERLESS_ADMIN_MAIL`           | `operator@localhost`                             | Email for the auto-created `operator` superuser  |
-| `PAPERLESS_PORT`                 | `8000`                                           | Granian listen port (matches manifest)           |
+| `PAPERLESS_PORT`                 | `8000`                                           | Granian loopback port (auth-proxy forwards here) |
+| `PAPERLESS_BIND_ADDR`            | `127.0.0.1`                                      | Paperless listens on loopback only; auth-proxy on 8080 is the only external port |
 | `PAPERLESS_USE_X_FORWARD_HOST`   | `true`                                           | Trust `X-Forwarded-Host` from the OpenHost router |
 | `PAPERLESS_PROXY_SSL_HEADER`     | `["HTTP_X_FORWARDED_PROTO","https"]`             | Tell Django the request was HTTPS so CSRF passes |
+| `PAPERLESS_ENABLE_HTTP_REMOTE_USER` | `true`                                        | Trust `Remote-User` header from the auth-proxy (Pattern A SSO) |
+| `PAPERLESS_ENABLE_HTTP_REMOTE_USER_API` | `true`                                    | Same trust for `/api/*` (mobile/desktop apps) |
+| `PAPERLESS_HTTP_REMOTE_USER_HEADER_NAME` | `HTTP_REMOTE_USER`                       | WSGI form of `Remote-User` request header        |
 
 `PAPERLESS_URL`, `PAPERLESS_ALLOWED_HOSTS`, and `PAPERLESS_CSRF_TRUSTED_ORIGINS` are derived automatically from `$OPENHOST_ZONE_DOMAIN` at boot.
 
@@ -99,14 +118,17 @@ All [Paperless env vars](https://docs.paperless-ngx.com/configuration/) work as 
 ## Layout of this repo
 
 ```
-openhost.toml                                                       # OpenHost manifest
+openhost.toml                                                       # OpenHost manifest (port=8080 → auth-proxy)
 Dockerfile                                                          # Builds on ghcr.io/paperless-ngx/paperless-ngx:latest
 rootfs/                                                             # COPY'd into the image
 ├── etc/s6-overlay/s6-rc.d/svc-redis/                               # Redis longrun service
-├── etc/s6-overlay/s6-rc.d/init-openhost-bootstrap/                 # Per-boot bootstrap (point data dirs at OPENHOST_APP_DATA_DIR via PAPERLESS_*_DIR env vars, mint admin password, set Django host config)
+├── etc/s6-overlay/s6-rc.d/svc-auth-proxy/                          # OpenHost SSO auth-proxy longrun (Pattern A trusted-header)
+├── etc/s6-overlay/s6-rc.d/init-openhost-bootstrap/                 # Per-boot bootstrap (point data dirs at OPENHOST_APP_DATA_DIR via PAPERLESS_*_DIR env vars, mint admin password, set Django host config, enable HTTP_REMOTE_USER auth)
 ├── etc/s6-overlay/s6-rc.d/init-folders/dependencies.d/init-openhost-bootstrap   # Order bootstrap before paperless dir-prep so PAPERLESS_DATA_DIR is set when init-folders mkdirs
 ├── etc/s6-overlay/s6-rc.d/init-wait-for-redis/dependencies.d/svc-redis          # Make paperless's Redis-readiness wait for ours to come up
 ├── etc/s6-overlay/s6-rc.d/user/contents.d/svc-redis                # Enable in default bundle
+├── etc/s6-overlay/s6-rc.d/user/contents.d/svc-auth-proxy           # Enable auth-proxy in default bundle
 ├── etc/s6-overlay/s6-rc.d/user/contents.d/init-openhost-bootstrap  # Enable in default bundle
-└── usr/local/bin/openhost-bootstrap.sh                             # Bootstrap implementation
+├── usr/local/bin/openhost-bootstrap.sh                             # Bootstrap implementation
+└── usr/local/bin/auth_proxy.py                                     # Pattern A auth-proxy (HTTP forwarder + Remote-User stamping)
 ```
