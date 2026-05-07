@@ -31,4 +31,7 @@
 
 set -e
 
-exec /usr/bin/python3 /usr/local/bin/auth_proxy.py
+# Paperless's image is based on python:3.12-slim, which puts python
+# in /usr/local/bin, not /usr/bin. Use `command -v` to be portable
+# across image rebases that might land elsewhere on PATH.
+exec "$(command -v python3)" /usr/local/bin/auth_proxy.py
