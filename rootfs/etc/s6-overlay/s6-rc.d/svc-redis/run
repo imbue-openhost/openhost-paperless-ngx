@@ -1,0 +1,44 @@
+#!/command/with-contenv /usr/bin/bash
+# shellcheck shell=bash
+#
+# svc-redis: bundled Redis instance for Paperless.
+#
+# Paperless's Celery + scheduler need a Redis broker; the standard
+# upstream deployment expects an external Redis service. We run one
+# on loopback inside the same container so the OpenHost packaging
+# remains a single image with no external dependencies.
+#
+# We deliberately do NOT use s6-setuidgid to drop privileges. The
+# whole container runs under rootless podman, so "root" inside the
+# container is already an unprivileged user on the host (mapped via
+# subuid). Running redis-server as in-container-root buys us nothing
+# in terms of host security (the host doesn't see real root) and
+# avoids a tricky bootstrap where we'd need to chown the redis runtime
+# dirs to whichever user we picked.
+#
+# Persistence is disabled (--save '' --appendonly no): Paperless
+# uses Redis purely as a Celery broker / cache, no durable state —
+# the SQLite database under $OPENHOST_APP_DATA_DIR/data is the
+# source of truth for documents and tasks.
+
+set -e
+
+# Use $OPENHOST_APP_TEMP_DIR if available (it isn't in this manifest;
+# we're keeping the manifest minimal), otherwise /tmp. Either way, the
+# actual data is throwaway because persistence is disabled.
+REDIS_DIR="${OPENHOST_APP_TEMP_DIR:-/tmp}/redis"
+mkdir -p "${REDIS_DIR}"
+
+# Bind to loopback only. Anything that talks to Redis lives in this
+# same container; exposing 6379 to the pod's network would invite
+# cross-app abuse via host.containers.internal.
+exec /usr/bin/redis-server \
+    --daemonize no \
+    --bind 127.0.0.1 \
+    --port 6379 \
+    --protected-mode yes \
+    --save '' \
+    --appendonly no \
+    --dir "${REDIS_DIR}" \
+    --logfile '' \
+    --loglevel notice

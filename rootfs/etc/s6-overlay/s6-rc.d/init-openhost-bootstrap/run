@@ -1,0 +1,9 @@
+#!/command/with-contenv /usr/bin/bash
+# shellcheck shell=bash
+
+# Thin wrapper that invokes the real bootstrap. The heavy logic
+# lives in /usr/local/bin/openhost-bootstrap.sh so it can be invoked
+# by hand for debugging (e.g. `podman exec ... openhost-bootstrap.sh`
+# to re-run after editing it in place) without going through s6's
+# `with-contenv` shim.
+exec /usr/local/bin/openhost-bootstrap.sh

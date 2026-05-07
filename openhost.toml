@@ -1,0 +1,44 @@
+[app]
+name = "paperless-ngx"
+version = "0.2.0"
+description = "Paperless-ngx document management with OCR (single-container, SQLite + bundled Redis) with OpenHost SSO via trusted-header injection."
+
+[runtime.container]
+image = "Dockerfile"
+# auth-proxy sidecar's listen port. Paperless's gunicorn binds
+# 127.0.0.1:8000 internally; the auth-proxy on 8080 is the only
+# port externally reachable.
+port = 8080
+
+[routing]
+# auth-proxy serves a static 200 on /_healthz immediately, so
+# OpenHost's health probe succeeds during paperless cold-start
+# (Django migrations + Whoosh index build can take 60-120s before
+# /accounts/login/ would respond).
+health_check = "/_healthz"
+# No public paths — paperless has no public-share concept; the
+# OpenHost router gates everything behind zone_auth, and the
+# auth-proxy auto-logs-in the owner. Anonymous visitors who
+# somehow reach paperless (e.g. a misconfiguration) will hit
+# paperless's own login form via its REMOTE_USER fallback path.
+public_paths = []
+
+[resources]
+# Paperless is heavy: it bundles a webserver, two celery workers, a
+# scheduler, a consume watcher, plus Redis. OCR (tesseract) is CPU-bound
+# and will use the whole core during ingestion. 1 GiB / 1 core gives the
+# whole stack room to breathe with light document loads; bump if you
+# regularly ingest large multi-page PDFs.
+memory_mb = 1024
+cpu_millicores = 1000
+
+[data]
+# Persistent Paperless state lives under $OPENHOST_APP_DATA_DIR:
+# the SQLite DB, Whoosh search index, original PDFs, thumbnails,
+# the consume drop-zone, and the generated admin-password.txt. The
+# export-staging dir is *not* relocated (Paperless does not expose
+# an env var override for it) and remains at /usr/src/paperless/
+# export inside the container — backed by an anonymous podman
+# volume that is not in OpenHost's backups. This is fine because
+# export output is throwaway data the operator copies elsewhere.
+app_data = true

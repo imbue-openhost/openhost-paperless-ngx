@@ -1,0 +1,34 @@
+#!/command/with-contenv /usr/bin/bash
+# shellcheck shell=bash
+#
+# svc-auth-proxy: OpenHost trusted-header SSO sidecar for Paperless-ngx.
+#
+# Listens on 0.0.0.0:8080 (the OpenHost-routed port from the
+# manifest) and forwards everything to 127.0.0.1:8000 (paperless's
+# gunicorn/granian). On owner requests it stamps `Remote-User:
+# operator` so paperless's PAPERLESS_ENABLE_HTTP_REMOTE_USER hook
+# auto-logs-in the operator.
+#
+# Defence in depth: the proxy strips any client-supplied
+# `Remote-User`, `X-Remote-User`, `X-OpenHost-Is-Owner`, and
+# `X-OpenHost-User` headers before processing. Without that strip,
+# anyone could authenticate as any user by injecting a Remote-User
+# header. The OpenHost router also strips them on inbound, so this
+# is two independent layers.
+#
+# The /admin/ Django admin uses session auth (REMOTE_USER doesn't
+# work there), so the proxy specifically does not stamp on that
+# path; the operator falls back to admin-password.txt for that one
+# endpoint.
+#
+# Health: GET /_healthz returns 200 immediately without forwarding,
+# so OpenHost's health probe can succeed during paperless cold-start
+# (Django migrations + Whoosh index build can take 60-120s).
+#
+# We run as in-container-root for the same reason as svc-redis:
+# the whole container is already userns-mapped under rootless
+# podman, so "root" inside is not real root on the host.
+
+set -e
+
+exec /usr/bin/python3 /usr/local/bin/auth_proxy.py
