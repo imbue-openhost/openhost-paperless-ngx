@@ -24,12 +24,16 @@ health_check = "/_healthz"
 public_paths = []
 
 [resources]
-# Paperless is heavy: it bundles a webserver, two celery workers, a
-# scheduler, a consume watcher, plus Redis. OCR (tesseract) is CPU-bound
-# and will use the whole core during ingestion. 1 GiB / 1 core gives the
-# whole stack room to breathe with light document loads; bump if you
-# regularly ingest large multi-page PDFs.
-memory_mb = 1024
+# Paperless is heavy: it bundles a webserver, celery worker(s), a
+# scheduler, a consume watcher, plus Redis. During ingestion, ocrmypdf +
+# tesseract + image optimization (pikepdf/img2pdf) can each transiently
+# need several hundred MB. At 1 GiB the OCR worker was OOM-killed
+# (SIGKILL / signal 9) mid-document, leaving uploads stuck at
+# "Upload complete, waiting...". 2 GiB gives the OCR pipeline headroom
+# alongside the rest of the stack. OCR concurrency is also pinned to a
+# single worker/thread in the bootstrap so one upload can't fan out into
+# several parallel tesseract processes and blow the ceiling again.
+memory_mb = 2048
 cpu_millicores = 1000
 
 [data]

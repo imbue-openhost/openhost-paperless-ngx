@@ -197,6 +197,27 @@ fi
 contenv_set PAPERLESS_SECRET_KEY "${SECRET_KEY}"
 
 # ---------------------------------------------------------------------------
+# 1e. OCR / worker concurrency limits.
+#
+# ocrmypdf + tesseract + image optimization are memory-hungry. In a
+# single OpenHost container these run alongside the webserver, celery
+# beat, the consume watcher and Redis, so unbounded parallelism trips
+# the memory ceiling and the kernel SIGKILLs the OCR worker mid-document
+# — leaving the upload stuck at "Upload complete, waiting...".
+#
+# We pin the pipeline to minimal concurrency so a single upload can't
+# fan out into several parallel tesseract processes:
+#   * PAPERLESS_TASK_WORKERS=1        — one celery worker process.
+#   * PAPERLESS_THREADS_PER_WORKER=1  — one OCR thread per task.
+#   * OMP_THREAD_LIMIT=1              — cap tesseract's own OpenMP threads.
+# These are only set if the operator hasn't overridden them via their
+# own environment, so someone on a larger instance can raise them.
+# ---------------------------------------------------------------------------
+[ -f "${CONTENV_DIR}/PAPERLESS_TASK_WORKERS" ]       || contenv_set PAPERLESS_TASK_WORKERS       "1"
+[ -f "${CONTENV_DIR}/PAPERLESS_THREADS_PER_WORKER" ] || contenv_set PAPERLESS_THREADS_PER_WORKER "1"
+[ -f "${CONTENV_DIR}/OMP_THREAD_LIMIT" ]             || contenv_set OMP_THREAD_LIMIT             "1"
+
+# ---------------------------------------------------------------------------
 # 2. URL / Host / CSRF config from $OPENHOST_ZONE_DOMAIN.
 #
 # OpenHost routes https://paperless-ngx.<zone>/* into our container.
