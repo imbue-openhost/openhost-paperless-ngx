@@ -144,6 +144,59 @@ contenv_set PAPERLESS_ENABLE_HTTP_REMOTE_USER_API "true"
 contenv_set PAPERLESS_HTTP_REMOTE_USER_HEADER_NAME "HTTP_REMOTE_USER"
 
 # ---------------------------------------------------------------------------
+# 1d. Django SECRET_KEY.
+#
+# Recent paperless-ngx releases refuse to start unless
+# PAPERLESS_SECRET_KEY is set to a non-default value (settings.py raises
+# ImproperlyConfigured when it is unset or equal to the seeded
+# "change-me"). The key must be *stable across reboots* — Django uses it
+# to sign sessions and (with the encrypted-fields feature) to protect
+# stored secrets, so re-rolling it on every boot would log everyone out
+# and could corrupt encrypted data. So we generate it once on first boot,
+# persist it under $OPENHOST_APP_DATA_DIR mode 0600, and re-export the
+# same value on every subsequent boot.
+#
+# The file lives outside the DB so it survives a DB reset and is trivial
+# to inspect. Anyone who can read it can forge sessions, so it is
+# mode 0600 and treated as a secret (same threat model as
+# admin-password.txt: an operator who mounts this app's data via
+# file-browser can read it).
+# ---------------------------------------------------------------------------
+
+SECRET_KEY_FILE="${DATA_ROOT}/secret-key.txt"
+
+if [ -f "${SECRET_KEY_FILE}" ]; then
+    SECRET_KEY=$(head -1 "${SECRET_KEY_FILE}")
+    if [ -z "${SECRET_KEY}" ]; then
+        log "ERROR: ${SECRET_KEY_FILE} exists but is empty; aborting bootstrap"
+        exit 1
+    fi
+    log "Loaded existing PAPERLESS_SECRET_KEY from ${SECRET_KEY_FILE}"
+else
+    log "First boot: generating PAPERLESS_SECRET_KEY"
+    # 64 random bytes -> URL-safe base64. We strip newlines only; the
+    # URL-safe alphabet (A-Za-z0-9-_) plus '=' padding is all accepted
+    # by Django's SECRET_KEY (it is treated as opaque bytes), so unlike
+    # the admin password we do not need to strip '+'/'/'.
+    SECRET_KEY=$(dd if=/dev/urandom bs=64 count=1 status=none | base64 | tr -d '\n')
+    if [ "${#SECRET_KEY}" -lt 43 ]; then
+        log "ERROR: generated secret key is only ${#SECRET_KEY} chars; aborting"
+        exit 1
+    fi
+    # Atomic write: temp file -> fsync -> rename, so a crash never leaves
+    # a partial key that a later boot would load as the real one.
+    umask 077
+    TMP_SECRET_KEY_FILE="${SECRET_KEY_FILE}.tmp"
+    printf '%s\n' "${SECRET_KEY}" > "${TMP_SECRET_KEY_FILE}"
+    chmod 0600 "${TMP_SECRET_KEY_FILE}"
+    sync "${TMP_SECRET_KEY_FILE}"
+    mv "${TMP_SECRET_KEY_FILE}" "${SECRET_KEY_FILE}"
+    log "Wrote PAPERLESS_SECRET_KEY to ${SECRET_KEY_FILE}"
+fi
+
+contenv_set PAPERLESS_SECRET_KEY "${SECRET_KEY}"
+
+# ---------------------------------------------------------------------------
 # 2. URL / Host / CSRF config from $OPENHOST_ZONE_DOMAIN.
 #
 # OpenHost routes https://paperless-ngx.<zone>/* into our container.
