@@ -180,6 +180,40 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             log.debug("client disconnected before error response: %s", exc)
 
+    def _should_serve_starting_placeholder(self) -> bool:
+        """Only serve the cold-start placeholder for top-level GET/HEAD
+        navigations. API/asset paths and mutating methods still get a 502
+        when the upstream is down, so we never hide a real failure from a
+        client that can't render an HTML placeholder anyway."""
+        if self.command not in ("GET", "HEAD"):
+            return False
+        path_only = self.path.split("?", 1)[0]
+        return path_only in ("/", "") or path_only == "/accounts/login/"
+
+    def _send_starting_placeholder(self) -> None:
+        body = (
+            b"<!doctype html><html><head><meta charset='utf-8'>"
+            b"<meta http-equiv='refresh' content='5'>"
+            b"<title>Starting\xe2\x80\xa6</title></head>"
+            b"<body style='font-family:sans-serif;max-width:36rem;margin:4rem auto;text-align:center'>"
+            b"<h1>Paperless-ngx is starting\xe2\x80\xa6</h1>"
+            b"<p>First boot runs database migrations and builds the search "
+            b"index; this can take a minute. This page refreshes automatically.</p>"
+            b"</body></html>"
+        )
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Retry-After", "5")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except OSError as exc:
+            log.debug("client disconnected during starting placeholder: %s", exc)
+
     def _dispatch(self) -> None:
         try:
             self.connection.settimeout(CLIENT_READ_TIMEOUT_SECONDS)
@@ -281,8 +315,26 @@ class AuthProxyHandler(BaseHTTPRequestHandler):
                 conn.endheaders(message_body=body)
                 upstream = conn.getresponse()
             except (OSError, http.client.HTTPException) as exc:
-                log.warning("upstream error: %s", exc)
-                self._safe_send_error(502, "Bad Gateway")
+                # Paperless takes ~60s to migrate + build its search index
+                # on first boot; while it is down the connection is
+                # refused. OpenHost's readiness probe polls the container's
+                # root path and treats any status >= 500 as "not ready",
+                # with only a 60s deadline (compute_space wait_for_ready).
+                # A plain 502 here therefore risks the app being marked
+                # "error: App started but not responding to HTTP" purely
+                # because paperless's cold start overran the probe window.
+                #
+                # So when the upstream is unreachable we serve a cheap 200
+                # "starting" placeholder for root-ish GET/HEAD navigations.
+                # This satisfies the readiness probe (and shows a friendly
+                # page to a human who lands mid-boot) without masking real
+                # errors on API/other paths, which still get a 502.
+                if self._should_serve_starting_placeholder():
+                    log.info("upstream unreachable; serving cold-start placeholder: %s", exc)
+                    self._send_starting_placeholder()
+                else:
+                    log.warning("upstream error: %s", exc)
+                    self._safe_send_error(502, "Bad Gateway")
                 return
 
             try:
