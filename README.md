@@ -1,6 +1,6 @@
-# openhost-paperless-ngx
+# bottled-paperless-ngx
 
-[Paperless-ngx][upstream] document management with OCR, packaged as a single-container OpenHost app.
+[Paperless-ngx][upstream] document management with OCR, packaged as a single-container Cloud in a Bottle app.
 
 [upstream]: https://github.com/paperless-ngx/paperless-ngx
 
@@ -12,7 +12,7 @@ This packaging targets a small personal archive (a few thousand documents). Heav
 
 ## Single-container approach
 
-Upstream Paperless ships as a docker-compose stack of 4–6 services (paperless app, Redis, optionally Postgres, Tika, Gotenberg). OpenHost runs one image per app, so this repo bundles the minimum necessary stack into a single container:
+Upstream Paperless ships as a docker-compose stack of 4–6 services (paperless app, Redis, optionally Postgres, Tika, Gotenberg). Cloud in a Bottle runs one image per app, so this repo bundles the minimum necessary stack into a single container:
 
 | Service                         | How it's run                                                       |
 |---------------------------------|--------------------------------------------------------------------|
@@ -21,7 +21,7 @@ Upstream Paperless ships as a docker-compose stack of 4–6 services (paperless 
 | Celery beat (scheduler)         | upstream s6 longrun `svc-scheduler`                                |
 | Document consumer (inotify)     | upstream s6 longrun `svc-consumer`                                 |
 | Redis (Celery broker)           | **bundled** s6 longrun `svc-redis` on `127.0.0.1:6379`             |
-| OpenHost SSO auth-proxy         | **bundled** s6 longrun `svc-auth-proxy` on `0.0.0.0:8080`          |
+| Cloud in a Bottle SSO auth-proxy         | **bundled** s6 longrun `svc-auth-proxy` on `0.0.0.0:8080`          |
 | Database                        | **SQLite** at `$OPENHOST_APP_DATA_DIR/data/db.sqlite3`             |
 
 Optional sidecars from the upstream compose (Tika for office docs, Gotenberg for HTML/email) are *not* included to keep the image small. The image already supports OCR for PDFs, images, and plain text — the bulk of personal-archive use cases.
@@ -39,15 +39,15 @@ $OPENHOST_APP_DATA_DIR/
 └── .admin_bootstrapped    # Sentinel — presence skips admin re-creation
 ```
 
-The OpenHost backup system covers this whole tree.
+The Cloud in a Bottle backup system covers this whole tree.
 
 The bootstrap wires Paperless to these locations by setting `PAPERLESS_DATA_DIR`, `PAPERLESS_MEDIA_ROOT`, and `PAPERLESS_CONSUMPTION_DIR` at runtime; the upstream `/usr/src/paperless/{data,media,consume,export}` paths (declared as `VOLUME` by the upstream image) are left as anonymous volumes and unused. Export staging continues to live in the anonymous volume since Paperless doesn't expose an env override for it; that's fine because export output is throwaway data the operator copies elsewhere.
 
 ## Logging in
 
-On first boot the bootstrap script generates a random 32-character password for the `operator` superuser and writes it to `$OPENHOST_APP_DATA_DIR/admin-password.txt`. To retrieve it from the host, ssh into the OpenHost VM and `cat ~/.openhost/local_compute_space/persistent_data/app_data/paperless-ngx/admin-password.txt` (the exact path varies with your OpenHost installation; the dashboard's "App data" link points at the right directory).
+On first boot the bootstrap script generates a random 32-character password for the `operator` superuser and writes it to `$OPENHOST_APP_DATA_DIR/admin-password.txt`. To retrieve it from the host, ssh into the Cloud in a Bottle VM and `cat ~/.openhost/local_compute_space/persistent_data/app_data/paperless-ngx/admin-password.txt` (the exact path varies with your Cloud in a Bottle installation; the dashboard's "App data" link points at the right directory).
 
-If you run the image outside OpenHost (e.g. `docker run` for testing) without setting `OPENHOST_APP_DATA_DIR`, the bootstrap falls back to `/data/admin-password.txt` inside the container, so mount a volume there to retrieve the password.
+If you run the image outside Cloud in a Bottle (e.g. `docker run` for testing) without setting `OPENHOST_APP_DATA_DIR`, the bootstrap falls back to `/data/admin-password.txt` inside the container, so mount a volume there to retrieve the password.
 
 You can change the password through Paperless's UI (Settings → Users → operator) afterwards. The bootstrap will not overwrite it on later boots — it's gated by the `.admin_bootstrapped` sentinel.
 
@@ -63,21 +63,21 @@ The command will prompt twice for a new password and update the database in plac
 
 ## Authentication and SSO
 
-This packaging integrates with OpenHost's zone-wide SSO via **Pattern A — trusted-header injection** (the same pattern used by `openhost-mediawiki` and `openhost-dokuwiki`).
+This packaging integrates with Cloud in a Bottle's zone-wide SSO via **Pattern A — trusted-header injection** (the same pattern used by `bottled-mediawiki` and `bottled-dokuwiki`).
 
 How it works:
 
-1. The OpenHost router verifies the visitor's `zone_auth` JWT and stamps `X-OpenHost-Is-Owner: true` on owner requests before they reach the container.
-2. A small Python auth-proxy sidecar (`svc-auth-proxy`) listens on the OpenHost-routed port (`8080`), strips any client-supplied `Remote-User` / `X-OpenHost-*` headers (defense in depth), and on owner requests forwards `Remote-User: operator` to paperless on `127.0.0.1:8000`.
+1. The Cloud in a Bottle router verifies the visitor's `zone_auth` JWT and stamps `X-OpenHost-Is-Owner: true` on owner requests before they reach the container.
+2. A small Python auth-proxy sidecar (`svc-auth-proxy`) listens on the Cloud in a Bottle-routed port (`8080`), strips any client-supplied `Remote-User` / `X-OpenHost-*` headers (defense in depth), and on owner requests forwards `Remote-User: operator` to paperless on `127.0.0.1:8000`.
 3. Paperless's `PAPERLESS_ENABLE_HTTP_REMOTE_USER=true` reads `HTTP_REMOTE_USER` from the WSGI environment (Django sources this from the request header `Remote-User`) and treats the named user as authenticated, auto-creating the account on first sight if missing. The bootstrap ensures the `operator` superuser already exists.
 
-The result: the OpenHost owner clicks paperless's tile in the dashboard, the auth-proxy stamps the trusted header, and they land directly on paperless's document list — no login form.
+The result: the Cloud in a Bottle owner clicks paperless's tile in the dashboard, the auth-proxy stamps the trusted header, and they land directly on paperless's document list — no login form.
 
-`PAPERLESS_ENABLE_HTTP_REMOTE_USER_API=true` extends the same trust to `/api/*` so the paperless mobile/desktop apps work behind the OpenHost router too (same JWT-gated routing applies).
+`PAPERLESS_ENABLE_HTTP_REMOTE_USER_API=true` extends the same trust to `/api/*` so the paperless mobile/desktop apps work behind the Cloud in a Bottle router too (same JWT-gated routing applies).
 
 ### Security
 
-Pattern A is only as secure as the proxy in front of it. We strip every variant of the trust header on every inbound request, regardless of source, before any other processing. Anyone bypassing the OpenHost router and reaching the container directly would still be unable to inject a `Remote-User` header without first compromising the auth-proxy itself.
+Pattern A is only as secure as the proxy in front of it. We strip every variant of the trust header on every inbound request, regardless of source, before any other processing. Anyone bypassing the Cloud in a Bottle router and reaching the container directly would still be unable to inject a `Remote-User` header without first compromising the auth-proxy itself.
 
 **`/admin/` is exempt** from header stamping. Django's built-in admin uses session auth (it doesn't honour `REMOTE_USER`), so stamping there would surface a logged-out form anyway. The `operator` password persisted to `$OPENHOST_APP_DATA_DIR/admin-password.txt` lets you reach `/admin/` if you ever need it.
 
@@ -100,7 +100,7 @@ All [Paperless env vars](https://docs.paperless-ngx.com/configuration/) work as 
 | `PAPERLESS_ADMIN_MAIL`           | `operator@localhost`                             | Email for the auto-created `operator` superuser  |
 | `PAPERLESS_PORT`                 | `8000`                                           | Granian loopback port (auth-proxy forwards here) |
 | `PAPERLESS_BIND_ADDR`            | `127.0.0.1`                                      | Paperless listens on loopback only; auth-proxy on 8080 is the only external port |
-| `PAPERLESS_USE_X_FORWARD_HOST`   | `true`                                           | Trust `X-Forwarded-Host` from the OpenHost router |
+| `PAPERLESS_USE_X_FORWARD_HOST`   | `true`                                           | Trust `X-Forwarded-Host` from the Cloud in a Bottle router |
 | `PAPERLESS_PROXY_SSL_HEADER`     | `["HTTP_X_FORWARDED_PROTO","https"]`             | Tell Django the request was HTTPS so CSRF passes |
 | `PAPERLESS_ENABLE_HTTP_REMOTE_USER` | `true`                                        | Trust `Remote-User` header from the auth-proxy (Pattern A SSO) |
 | `PAPERLESS_ENABLE_HTTP_REMOTE_USER_API` | `true`                                    | Same trust for `/api/*` (mobile/desktop apps) |
@@ -110,10 +110,10 @@ All [Paperless env vars](https://docs.paperless-ngx.com/configuration/) work as 
 
 ## Caveats
 
-- **First-boot is slow.** Paperless runs Django migrations, builds the Whoosh index, downloads NLTK data (already baked into the image), and provisions the admin user before the webserver starts. Expect 60–120 s before `/` returns 200, sometimes longer on a small VM. The OpenHost deploy poll loop should account for this.
+- **First-boot is slow.** Paperless runs Django migrations, builds the Whoosh index, downloads NLTK data (already baked into the image), and provisions the admin user before the webserver starts. Expect 60–120 s before `/` returns 200, sometimes longer on a small VM. The Cloud in a Bottle deploy poll loop should account for this.
 - **OCR is CPU-heavy.** A single 20-page scanned PDF can pin 1 core for 30+ seconds. The manifest reserves 1 core (`cpu_millicores = 1000`); if you have a fast multi-core host, raising both the manifest reservation and `PAPERLESS_TASK_WORKERS` / `PAPERLESS_THREADS_PER_WORKER` will speed up bulk imports.
 - **RAM footprint is ~600 MiB idle.** Granian + four celery processes + Redis. Consumes more during indexing. The 1 GiB manifest reservation is comfortable for personal use.
-- **No PostgreSQL/Tika/Gotenberg.** SQLite is fine up to a few thousand docs; office-format ingestion (.docx, .xlsx, .eml) won't work without Tika. If you need those, add the upstream services as sidecars or run upstream's docker-compose stack on a non-OpenHost host.
+- **No PostgreSQL/Tika/Gotenberg.** SQLite is fine up to a few thousand docs; office-format ingestion (.docx, .xlsx, .eml) won't work without Tika. If you need those, add the upstream services as sidecars or run upstream's docker-compose stack on a non-Cloud in a Bottle host.
 
 ## Layout of this repo
 
