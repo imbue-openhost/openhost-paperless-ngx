@@ -1,7 +1,7 @@
 [app]
 name = "paperless-ngx"
 version = "0.2.0"
-description = "Paperless-ngx document management with OCR (single-container, SQLite + bundled Redis) with OpenHost SSO via trusted-header injection."
+description = "Paperless-ngx document management with OCR (single-container, SQLite + bundled Redis) with Cloud in a Bottle SSO via trusted-header injection."
 
 [runtime.container]
 image = "Dockerfile"
