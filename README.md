@@ -2,6 +2,8 @@
 
 [Paperless-ngx][upstream] document management with OCR, packaged as a single-container Cloud in a Bottle app.
 
+[![Deploy on Cloud in a Bottle](https://img.shields.io/badge/Deploy_on-Cloud_in_a_Bottle-2563eb)](https://my.cloudinabottle.org/redirect/deploy?repo=https%3A%2F%2Fgithub.com%2Fcloud-in-a-bottle%2Fbottled-paperless-ngx)
+
 [upstream]: https://github.com/paperless-ngx/paperless-ngx
 
 ## What you get
